@@ -316,38 +316,31 @@ class AccountTrialBalance(models.TransientModel):
         return move_line_list
 
     @api.model
-    def get_month_name(self, date):
-        """
-        Retrieve the abbreviated name of the month for a given date.
-        :param date: The date for which to retrieve the month's abbreviated name.
-        :type date: datetime.date
-        :return: Abbreviated name of the month (e.g., 'Jan', 'Feb', ..., 'Dec').
-        :rtype: str
-        """
-        month_names = calendar.month_abbr
-        return month_names[date.month]
-
-    @api.model
     def get_xlsx_report(self, data, response, report_name, report_action):
         """
         Generate an XLSX report based on provided data and response stream.
         Generates an Excel workbook with specified report format, including
-        subheadings,column headers, and row data for the given financial report
-        data.
+        subheadings, column headers, and row data for the given financial report
+        data, and adds a grand total row at the end.
+
         :param str data: JSON-encoded data for the report.
         :param response: Response object to stream the generated report.
         :param str report_name: Name of the financial report.
+        :param str report_action: Action identifier for the report type.
         """
         data = json.loads(data)
         output = io.BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+
+        # Get start and end dates from filters
         start_date = data['filters']['start_date'] if \
             data['filters']['start_date'] else ''
         end_date = data['filters']['end_date'] if \
             data['filters']['end_date'] else ''
+
+        # Define formats for the workbook
         head = workbook.add_format(
             {'font_size': 15, 'align': 'center', 'bold': True})
-        sheet = workbook.add_worksheet()
         sub_heading = workbook.add_format(
             {'align': 'center', 'bold': True, 'font_size': '10px',
              'border': 1, 'bg_color': '#D3D3D3',
@@ -363,19 +356,36 @@ class AccountTrialBalance(models.TransientModel):
              'border': 1,
              'border_color': 'black'})
         side_heading_sub.set_indent(1)
-        txt_name = workbook.add_format({'font_size': '10px', 'border': 1})
-        txt_name.set_indent(2)
-        sheet.set_column(0, 0, 30)
-        sheet.set_column(1, 1, 20)
-        sheet.set_column(2, 2, 15)
-        sheet.set_column(3, 3, 15)
+        
+        # Format for regular numerical values with IDR currency
+        currency_txt_format = workbook.add_format({'font_size': '10px', 'border': 1, 'num_format': '_ "Rp. " #,##0.00'})
+        currency_txt_format.set_indent(2)
+        
+        # Format for grand total row with IDR currency
+        grand_total_currency_format = workbook.add_format(
+            {'font_size': 10, 'bold': True, 'border': 1, 'bg_color': '#D3D3D3', 'align': 'right', 'num_format': '_ "IDR" #,##0.00'})
+
+
+        sheet = workbook.add_worksheet()
+
+        # Set column widths
+        sheet.set_column(0, 0, 30)  # Account column
+        sheet.set_column(1, 1, 20)  # Initial Debit
+        sheet.set_column(2, 2, 20)  # Initial Credit
+        # Dynamic columns will be set based on comparison periods
+
         col = 0
-        sheet.write('A1:b1', report_name, head)
-        sheet.write('B3:b4', 'Date Range', filter_head)
-        sheet.write('B4:b4', 'Comparison', filter_head)
-        sheet.write('B5:b4', 'Journal', filter_head)
-        sheet.write('B6:b4', 'Account', filter_head)
-        sheet.write('B7:b4', 'Option', filter_head)
+        # Report Title
+        sheet.merge_range('A1:B1', report_name, head)
+
+        # Filter Headers
+        sheet.write('B3', 'Date Range', filter_head)
+        sheet.write('B4', 'Comparison', filter_head)
+        sheet.write('B5', 'Journal', filter_head)
+        sheet.write('B6', 'Account', filter_head)
+        sheet.write('B7', 'Option', filter_head)
+
+        # Filter Values
         if start_date or end_date:
             sheet.merge_range('C3:G3', f"{start_date} to {end_date}",
                               filter_body)
@@ -397,55 +407,147 @@ class AccountTrialBalance(models.TransientModel):
             option_keys = list(data['filters']['options'].keys())
             option_keys_str = ', '.join(option_keys)
             sheet.merge_range('C7:G7', option_keys_str, filter_body)
-        sheet.write(9, col, '', sub_heading)
+
+        # Table Headers - Row 9 (Merged Date Views)
+        sheet.write(9, col, '', sub_heading) # Empty cell for Account Name
         sheet.merge_range(9, col + 1, 9, col + 2, 'Initial Balance',
                           sub_heading)
+        
+        # Dynamic Date View Headers
         i = 3
         for date_view in data['date_viewed']:
             sheet.merge_range(9, col + i, 9, col + i + 1, date_view,
                               sub_heading)
             i += 2
+        
+        # End Balance Header
         sheet.merge_range(9, col + i, 9, col + i + 1, 'End Balance',
                           sub_heading)
-        sheet.write(10, col, '', sub_heading)
+
+        # Table Headers - Row 10 (Debit/Credit)
+        sheet.write(10, col, 'Account', sub_heading) # Account column header
         sheet.write(10, col + 1, 'Debit', sub_heading)
         sheet.write(10, col + 2, 'Credit', sub_heading)
+        
+        # Dynamic Debit/Credit Headers for Date Views
         i = 3
         for date_views in data['date_viewed']:
             sheet.write(10, col + i, 'Debit', sub_heading)
             i += 1
             sheet.write(10, col + i, 'Credit', sub_heading)
             i += 1
+        
+        # Debit/Credit Headers for End Balance
         sheet.write(10, col + i, 'Debit', sub_heading)
         sheet.write(10, col + (i + 1), 'Credit', sub_heading)
+
+        # Initialize grand totals
+        grand_total_initial_debit = 0.0
+        grand_total_initial_credit = 0.0
+        
+        # Dictionary to hold dynamic comparison totals
+        grand_total_dynamic_debits = {}
+        grand_total_dynamic_credits = {}
+
+        grand_total_debit = 0.0
+        grand_total_credit = 0.0
+        grand_total_end_debit = 0.0
+        grand_total_end_credit = 0.0
+
         if data:
             if report_action == 'dynamic_accounts_report.action_trial_balance':
                 row = 11
                 for move_line in data['data'][0]:
                     sheet.write(row, col, move_line['account'],
                                 side_heading_sub)
-                    sheet.write(row, col + 1, move_line['initial_total_debit'],
-                                txt_name)
-                    sheet.write(row, col + 2,
-                                move_line['initial_total_credit'], txt_name)
-                    j = 3
+                    
+                    # Get values and replace commas before converting to float
+                    initial_debit_str = str(move_line.get('initial_total_debit', '0.0')).replace(',', '')
+                    initial_credit_str = str(move_line.get('initial_total_credit', '0.0')).replace(',', '')
+                    
+                    initial_debit = float(initial_debit_str)
+                    initial_credit = float(initial_credit_str)
+
+                    sheet.write(row, col + 1, initial_debit, currency_txt_format)
+                    sheet.write(row, col + 2, initial_credit, currency_txt_format)
+
+                    # Accumulate initial totals
+                    grand_total_initial_debit += initial_debit
+                    grand_total_initial_credit += initial_credit
+
+                    j = 3 # Starting column for dynamic data
                     if data['apply_comparison']:
                         number_of_periods = data['comparison_number_range']
                         for num in number_of_periods:
-                            sheet.write(row, col + j, move_line[
-                                'dynamic_total_debit_' + str(num)], txt_name)
-                            sheet.write(row, col + j + 1, move_line[
-                                'dynamic_total_credit_' + str(num)], txt_name)
+                            dynamic_debit_key = 'dynamic_total_debit_' + str(num)
+                            dynamic_credit_key = 'dynamic_total_credit_' + str(num)
+                            
+                            current_dynamic_debit_str = str(move_line.get(dynamic_debit_key, '0.0')).replace(',', '')
+                            current_dynamic_credit_str = str(move_line.get(dynamic_credit_key, '0.0')).replace(',', '')
+
+                            current_dynamic_debit = float(current_dynamic_debit_str)
+                            current_dynamic_credit = float(current_dynamic_credit_str)
+
+                            sheet.write(row, col + j, current_dynamic_debit, currency_txt_format)
+                            sheet.write(row, col + j + 1, current_dynamic_credit, currency_txt_format)
+
+                            # Accumulate dynamic totals
+                            grand_total_dynamic_debits[num] = grand_total_dynamic_debits.get(num, 0.0) + current_dynamic_debit
+                            grand_total_dynamic_credits[num] = grand_total_dynamic_credits.get(num, 0.0) + current_dynamic_credit
+                            
                             j += 2
-                    sheet.write(row, col + j, move_line['total_debit'],
-                                txt_name)
-                    sheet.write(row, col + j + 1, move_line['total_credit'],
-                                txt_name)
-                    sheet.write(row, col + j + 2, move_line['end_total_debit'],
-                                txt_name)
-                    sheet.write(row, col + j + 3,
-                                move_line['end_total_credit'], txt_name)
+                    
+                    # Get values and replace commas before converting to float
+                    total_debit_str = str(move_line.get('total_debit', '0.0')).replace(',', '')
+                    total_credit_str = str(move_line.get('total_credit', '0.0')).replace(',', '')
+
+                    total_debit = float(total_debit_str)
+                    total_credit = float(total_credit_str)
+
+                    # Write total debit and credit (for main period)
+                    sheet.write(row, col + j, total_debit, currency_txt_format)
+                    sheet.write(row, col + j + 1, total_credit, currency_txt_format)
+
+                    # Accumulate total debit and credit
+                    grand_total_debit += total_debit
+                    grand_total_credit += total_credit
+
+                    # Get values and replace commas before converting to float
+                    end_debit_str = str(move_line.get('end_total_debit', '0.0')).replace(',', '')
+                    end_credit_str = str(move_line.get('end_total_credit', '0.0')).replace(',', '')
+
+                    end_debit = float(end_debit_str)
+                    end_credit = float(end_credit_str)
+
+                    # Write end total debit and credit
+                    sheet.write(row, col + j + 2, end_debit, currency_txt_format)
+                    sheet.write(row, col + j + 3, end_credit, currency_txt_format)
+
+                    # Accumulate end total debit and credit
+                    grand_total_end_debit += end_debit
+                    grand_total_end_credit += end_credit
+
                     row += 1
+                
+                # Add the Grand Total row
+                sheet.write(row, col, 'Grand Total', grand_total_currency_format)
+                sheet.write(row, col + 1, grand_total_initial_debit, grand_total_currency_format)
+                sheet.write(row, col + 2, grand_total_initial_credit, grand_total_currency_format)
+
+                j = 3 # Starting column for dynamic data in grand total row
+                if data['apply_comparison']:
+                    number_of_periods = data['comparison_number_range']
+                    for num in number_of_periods:
+                        sheet.write(row, col + j, grand_total_dynamic_debits.get(num, 0.0), grand_total_currency_format)
+                        sheet.write(row, col + j + 1, grand_total_dynamic_credits.get(num, 0.0), grand_total_currency_format)
+                        j += 2
+                
+                sheet.write(row, col + j, grand_total_debit, grand_total_currency_format)
+                sheet.write(row, col + j + 1, grand_total_credit, grand_total_currency_format)
+                sheet.write(row, col + j + 2, grand_total_end_debit, grand_total_currency_format)
+                sheet.write(row, col + j + 3, grand_total_end_credit, grand_total_currency_format)
+
+
         workbook.close()
         output.seek(0)
         response.stream.write(output.read())
