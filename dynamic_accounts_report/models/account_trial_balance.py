@@ -363,7 +363,7 @@ class AccountTrialBalance(models.TransientModel):
         
         # Format for grand total row with IDR currency
         grand_total_currency_format = workbook.add_format(
-            {'font_size': 10, 'bold': True, 'border': 1, 'bg_color': '#D3D3D3', 'align': 'right', 'num_format': '_ "IDR" #,##0.00'})
+            {'font_size': 10, 'bold': True, 'border': 1, 'bg_color': '#D3D3D3', 'align': 'right', 'num_format': '_ "Rp. " #,##0.00'})
 
 
         sheet = workbook.add_worksheet()
